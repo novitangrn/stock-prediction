@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
+import os
 
 # **Dataset STACN**
 class STACN_Dataset(Dataset):
@@ -15,20 +16,14 @@ class STACN_Dataset(Dataset):
         self.scaler = scaler if scaler is not None else StandardScaler()
         self.close_scaler = close_scaler if close_scaler is not None else StandardScaler()
 
-        # Create a copy of the dataframe
         df = df.copy()
+        df["return_close"] = df["close"].pct_change().fillna(0)
 
-        if "return_close" not in df.columns:
-            df["return_close"] = df["close"].pct_change().fillna(0)
-
-        # Fit scalers if not already fit
         if not hasattr(self.scaler, 'mean_'):
             self.scaler.fit(df[["close", "open", "high", "low"]].values)
-
         if not hasattr(self.close_scaler, 'mean_'):
             self.close_scaler.fit(df[["close"]].values)
 
-        # Transform the data
         df[["close", "open", "high", "low"]] = self.scaler.transform(df[["close", "open", "high", "low"]].values)
 
         for i in range(lookback, len(df) - forecast):
@@ -78,28 +73,12 @@ class STACN(nn.Module):
             nn.MaxPool3d(kernel_size=(1,2,2), stride=(1,2,2))
         )
 
-        self.lstm = nn.LSTM(
-            input_size=input_size,
-            hidden_size=hidden_size,
-            num_layers=num_layers,
-            batch_first=True,
-            dropout=dropout if num_layers > 1 else 0
-        )
-
-        self.attention = nn.Sequential(
-            nn.Linear(hidden_size, cnn_out_channels),
-            nn.Tanh(),
-            nn.Softmax(dim=1),
-            nn.Dropout(dropout)
-        )
+        self.lstm = nn.LSTM(input_size=input_size, hidden_size=hidden_size, num_layers=num_layers,
+                             batch_first=True, dropout=dropout if num_layers > 1 else 0)
 
         self.fc = nn.Sequential(
-            nn.Linear(cnn_out_channels + hidden_size, 128),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Dropout(dropout),
+            nn.Linear(cnn_out_channels + hidden_size, 128), nn.ReLU(), nn.Dropout(dropout),
+            nn.Linear(128, 64), nn.ReLU(), nn.Dropout(dropout),
             nn.Linear(64, 1)
         )
 
@@ -114,159 +93,65 @@ class STACN(nn.Module):
         x_stock, _ = self.lstm(stock_features)
         x_stock = x_stock[:, -1, :]
 
-        attention_weights = self.attention(x_stock)
-        x_news = x_news * attention_weights
-
         x_combined = torch.cat([x_news, x_stock], dim=1)
         output = self.fc(x_combined)
-
         return output
 
-
-class ModelTrainer:
-    def __init__(self, model, device, close_scaler, learning_rate=0.001, patience=3):
-        self.model = model
-        self.device = device
-        self.close_scaler = close_scaler
-        self.criterion = nn.MSELoss()
-        self.optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-5)
-        self.scheduler = optim.lr_scheduler.StepLR(self.optimizer, step_size=3, gamma=0.5)
-        self.patience = patience
-
-        self.train_losses = []
-        self.val_losses = []
-        self.best_val_loss = float('inf')  # Initialize best validation loss to infinity
-        self.epochs_without_improvement = 0  # Counter for early stopping
-        self.best_model_state = None  # Store best model state
-
-    def train(self, train_loader):
-        self.model.train()
-        epoch_loss = 0
-        for batch in train_loader:
-            thought_vectors, stock_features, targets = [item.to(self.device) for item in batch]
-            self.optimizer.zero_grad()
-            outputs = self.model(thought_vectors, stock_features)
-            loss = self.criterion(outputs, targets)
-            loss.backward()
-            self.optimizer.step()
-            epoch_loss += loss.item()
-
-        self.train_losses.append(epoch_loss / len(train_loader))
-
-    def validate(self, val_loader):
-        self.model.eval()
-        epoch_loss = 0
-        predictions, actuals = [], []
-
-        with torch.no_grad():
-            for batch in val_loader:
-                thought_vectors, stock_features, targets = [item.to(self.device) for item in batch]
-                outputs = self.model(thought_vectors, stock_features)
-                loss = self.criterion(outputs, targets)
-                epoch_loss += loss.item()
-
-                # Properly reshape and transform back to original scale
-                outputs_np = outputs.cpu().numpy()
-                targets_np = targets.cpu().numpy()
-
-                # Reshape if needed
-                if len(outputs_np.shape) == 1:
-                    outputs_np = outputs_np.reshape(-1, 1)
-                if len(targets_np.shape) == 1:
-                    targets_np = targets_np.reshape(-1, 1)
-
-                # Inverse transform
-                outputs_np = self.close_scaler.inverse_transform(outputs_np)
-                targets_np = self.close_scaler.inverse_transform(targets_np)
-
-                predictions.extend(outputs_np.flatten())
-                actuals.extend(targets_np.flatten())
-
-        self.val_losses.append(epoch_loss / len(val_loader))
-
-        mse = mean_squared_error(actuals, predictions)
-        mae = mean_absolute_error(actuals, predictions)
-        return mse, mae, predictions, actuals
-
-
-    def predict(self, val_loader):
-        self.model.eval()
-        predictions, actuals = [], []
-
-        with torch.no_grad():
-            for batch in val_loader:
-                thought_vectors, stock_features, targets = [item.to(self.device) for item in batch]
-                outputs = self.model(thought_vectors, stock_features)
-
-                outputs_np = outputs.cpu().numpy().reshape(-1, 1)
-                targets_np = targets.cpu().numpy().reshape(-1, 1)
-
-                outputs_np = self.close_scaler.inverse_transform(outputs_np)
-                targets_np = self.close_scaler.inverse_transform(targets_np)
-
-                predictions.extend(outputs_np.flatten())
-                actuals.extend(targets_np.flatten())
-
-        return predictions, actuals
-
-
-# **Preprocessing dan Training Model**
+# **1️⃣ Persiapkan Device**
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-data_loaders = {}
 
-# Initialize scalers and fit them on all data
+# **2️⃣ Normalisasi Data**
 price_scaler = StandardScaler()
 close_scaler = StandardScaler()
 
-# Prepare all price data for fitting
 all_prices = np.concatenate([df[["close", "open", "high", "low"]].values for df in synced_data.values()])
-all_close_prices = np.concatenate([df[["close"]].values for df in synced_data.values()])
+all_close_prices = np.concatenate([df[["close"]].values for df in synced_data.values()]).reshape(-1, 1)  # Ensure 2D
 
-# Fit the scalers
 price_scaler.fit(all_prices)
 close_scaler.fit(all_close_prices)
 
-
-for sector, df in synced_data.items():
-    dataset = STACN_Dataset(df=df, lookback=10, forecast=1, target_col='close', scaler=price_scaler, close_scaler=close_scaler)
-    train_indices, val_indices = train_test_split(list(range(len(dataset))), test_size=0.2, random_state=42)
-    train_loader = DataLoader(torch.utils.data.Subset(dataset, train_indices), batch_size=16, shuffle=True, collate_fn=collate_fn)
-    val_loader = DataLoader(torch.utils.data.Subset(dataset, val_indices), batch_size=16, shuffle=False, collate_fn=collate_fn)
-
-    data_loaders[sector] = {'train': train_loader, 'val': val_loader}
-
-for sector, loaders in data_loaders.items():
-    print(f"\nTraining model for sector: {sector}")
+# **3️⃣ Fungsi untuk Training Model**
+def train_model(sector, train_loader, val_loader, close_scaler, device, num_epochs=100, patience=10):
+    """Fungsi untuk melatih model per sektor"""
     model = STACN().to(device)
     trainer = ModelTrainer(model, device, close_scaler)
 
     best_val_loss = float('inf')
     best_model_state = None
-    all_predictions = []
-    all_actuals = []
+    no_improve = 0  # Counter untuk Early Stopping
 
-    for epoch in range(100):  # Tetap berjalan hingga 100 epoch
-        trainer.train(loaders['train'])
-        mse, mae, predictions, actuals = trainer.validate(loaders['val'])
+    for epoch in range(num_epochs):
+        trainer.train(train_loader)
+        mse, mae, predictions, actuals = trainer.validate(val_loader)
         val_loss = trainer.val_losses[-1]
 
-        # Simpan model terbaik berdasarkan validasi loss
+        # **Cek apakah model membaik**
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_model_state = model.state_dict()
-            all_predictions = predictions
-            all_actuals = actuals
+            best_predictions = predictions
+            best_actuals = actuals
+            no_improve = 0  # Reset counter
+        else:
+            no_improve += 1
 
-        print(f"Saham {sector} - Epoch {epoch+1}: MSE: {mse:.6f}, MAE: {mae:.6f}, "
+        print(f"Sektor {sector} - Epoch {epoch+1}: MSE: {mse:.6f}, MAE: {mae:.6f}, "
               f"Train Loss: {trainer.train_losses[-1]:.6f}, Val Loss: {val_loss:.6f}")
 
-    # Simpan model terbaik untuk sektor ini
-    if best_model_state is not None:
+        # **Cek Early Stopping**
+        if no_improve >= patience:
+            print(f"Early stopping for {sector} at epoch {epoch+1}")
+            break
+
+    # **Simpan Model Terbaik**
+    if best_model_state:
         torch.save(best_model_state, f"best_model_{sector}.pth")
         print(f"Best model saved for {sector}")
 
-    # Plot training dan validation loss
+    # **Visualisasi Training & Validation Loss**
     plt.figure(figsize=(12, 5))
+
+    # **Plot Loss**
     plt.subplot(1, 2, 1)
     plt.plot(trainer.train_losses, label='Train Loss')
     plt.plot(trainer.val_losses, label='Validation Loss')
@@ -276,10 +161,10 @@ for sector, loaders in data_loaders.items():
     plt.legend()
     plt.grid(True)
 
-    # Plot predicted vs actual values
+    # **Plot Prediksi vs Aktual**
     plt.subplot(1, 2, 2)
-    plt.plot(all_actuals, label='Actual Values', color='blue', alpha=0.7)
-    plt.plot(all_predictions, label='Predicted Values', color='red', alpha=0.7)
+    plt.plot(best_actuals, label='Actual Values', color='blue', alpha=0.7)
+    plt.plot(best_predictions, label='Predicted Values', color='red', alpha=0.7)
     plt.title(f'Predicted vs Actual Values - {sector}')
     plt.xlabel('Time Steps')
     plt.ylabel('Price')
@@ -287,10 +172,26 @@ for sector, loaders in data_loaders.items():
     plt.grid(True)
 
     plt.tight_layout()
+    plt.savefig(f'visualization_{sector}.png')
     plt.show()
 
-    # Simpan visualisasi
-    plt.savefig(f'visualization_{sector}.png')
-    plt.close()
+# **4️⃣ Buat DataLoader untuk Setiap Sektor**
+data_loaders = {}
+for sector, df in synced_data.items():
+    dataset = STACN_Dataset(df=df, lookback=10, forecast=1, target_col='close', scaler=price_scaler, close_scaler=close_scaler)
+
+    # **Pisahkan data 80% train, 20% validasi (tanpa shuffle)**
+    train_size = int(0.8 * len(dataset))
+    train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, len(dataset) - train_size])
+
+    train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True, collate_fn=collate_fn)
+    val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False, collate_fn=collate_fn)
+
+    data_loaders[sector] = {'train': train_loader, 'val': val_loader}
+
+# **5️⃣ Training Model untuk Semua Sektor**
+for sector, loaders in data_loaders.items():
+    print(f"\nTraining model for sector: {sector}")
+    train_model(sector, loaders['train'], loaders['val'], close_scaler, device)
 
 print("Training completed for all sectors!")
