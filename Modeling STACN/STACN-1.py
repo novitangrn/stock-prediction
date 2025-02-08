@@ -67,7 +67,7 @@ def collate_fn(batch):
 
 # **Model STACN**
 class STACN(nn.Module):
-    def __init__(self, input_size=4, hidden_size=512, num_layers=3, cnn_out_channels=128, dropout=0.2):
+    def __init__(self, input_size=4, hidden_size=512, num_layers=2, cnn_out_channels=128, dropout=0.01):
         super(STACN, self).__init__()
 
         self.cnn = nn.Sequential(
@@ -230,8 +230,8 @@ close_scaler.fit(all_close_prices)
 for sector, df in synced_data.items():
     dataset = STACN_Dataset(df=df, lookback=10, forecast=1, target_col='close', scaler=price_scaler, close_scaler=close_scaler)
     train_indices, val_indices = train_test_split(list(range(len(dataset))), test_size=0.2, random_state=42)
-    train_loader = DataLoader(torch.utils.data.Subset(dataset, train_indices), batch_size=32, shuffle=True, collate_fn=collate_fn)
-    val_loader = DataLoader(torch.utils.data.Subset(dataset, val_indices), batch_size=32, shuffle=False, collate_fn=collate_fn)
+    train_loader = DataLoader(torch.utils.data.Subset(dataset, train_indices), batch_size=16, shuffle=True, collate_fn=collate_fn)
+    val_loader = DataLoader(torch.utils.data.Subset(dataset, val_indices), batch_size=16, shuffle=False, collate_fn=collate_fn)
 
     data_loaders[sector] = {'train': train_loader, 'val': val_loader}
 
